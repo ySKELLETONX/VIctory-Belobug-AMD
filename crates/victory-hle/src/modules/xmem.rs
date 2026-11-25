@@ -690,13 +690,6 @@ const WHOLE: usize = 1 << 30;
 /// where the title puts a page is where in the section it goes (pages hold
 /// nothing before they are first mapped). True if done.
 fn map_whole(physical: &mut Physical, base: usize, pages: &[usize]) -> bool {
-    // Tiny reservations stay per page: the whole view is for the title's
-    // large GPU heap mappings (185 MB), and a small reservation's pages are
-    // expected to keep their own state when one of them is unmapped
-    // (issue #8). The debug line below already looks at the same threshold.
-    if pages.len() <= 64 {
-        return false;
-    }
     let Some(end) = pages
         .len()
         .checked_mul(PAGE)
@@ -716,7 +709,15 @@ fn map_whole(physical: &mut Physical, base: usize, pages: &[usize]) -> bool {
         .find(|(at, len, _)| *at <= base && end <= at + len)
         .cloned();
     let (at, _, section) = match known {
+        // A later call into a reservation already shown whole goes to its
+        // view, however few pages: the title maps its GPU heap in several
+        // calls, and the reservation has no placeholders left there.
         Some(w) => w,
+        // Tiny runs do not make a whole view: the whole view is for the
+        // title's large GPU heap mappings (185 MB), and a small
+        // reservation's pages are expected to keep their own state when one
+        // of them is unmapped (issue #8).
+        None if pages.len() <= 64 => return false,
         None => {
             let Some(&(at, len)) = physical
                 .reservations
@@ -1463,6 +1464,39 @@ mod tests {
         unsafe {
             reservation.cast::<u8>().write(5);
             assert_eq!(reservation.cast::<u8>().read(), 5);
+        }
+        assert_eq!(XMemFreePhysicalPages(N, pages.as_ptr()), 1);
+    }
+
+    /// The title maps its GPU heap in several calls: once a large first
+    /// call shows the reservation whole, a later run of 64 pages or fewer
+    /// into it goes to that view too, not to placeholders it no longer has.
+    #[test]
+    fn a_small_run_into_a_reservation_shown_whole_is_mapped() {
+        const N: usize = 80;
+        const FIRST: usize = 70;
+        let pages = allocate(N);
+        let reservation = XMemVirtualAlloc(
+            std::ptr::null_mut(),
+            N * PAGE,
+            MEM_RESERVE | PAGES_64K,
+            0,
+            PAGE_READWRITE,
+        );
+        assert!(!reservation.is_null());
+        assert_eq!(XMemMapPhysicalPages(reservation, FIRST, pages.as_ptr()), reservation);
+        assert!(in_whole(&physical(), reservation as usize, N * PAGE));
+
+        let rest = reservation.wrapping_byte_add(FIRST * PAGE);
+        assert_eq!(
+            XMemMapPhysicalPages(rest, N - FIRST, pages[FIRST..].as_ptr()),
+            rest,
+            "the small run lands in the whole view"
+        );
+        // SAFETY: the whole reservation is mapped read-write.
+        unsafe {
+            rest.cast::<u8>().write(9);
+            assert_eq!(rest.cast::<u8>().read(), 9);
         }
         assert_eq!(XMemFreePhysicalPages(N, pages.as_ptr()), 1);
     }
