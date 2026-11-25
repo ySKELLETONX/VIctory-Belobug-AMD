@@ -1,3 +1,6 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
 # The xmem page pool and the GPU differential tests are global state shared
 # between tests. Run test binaries with one thread by default, as the hardware
 # runs already do; `--test-threads` on the command line still wins.
